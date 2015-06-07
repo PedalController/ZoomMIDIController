@@ -1,0 +1,302 @@
+//
+//   ZOOM G3 Pedal State Change using MIDI over USB
+//           (c)2013, Paulo Mateus
+//            mateus.moura@hotmail.com
+//
+// Library Used:
+// https://github.com/YuuichiAkagawa/USBH_MIDI
+// Basede in:
+// https://github.com/vegos/ArduinoMIDI
+
+//http://blog.petrockblock.com/2012/05/19/usb-keyboard-with-arduino-and-v-usb-library-an-example/
+//http://labdegaragem.com/profiles/blogs/tutorial-conhe-a-o-conversor-usb-serial-ft232rl
+//http://vusb.wikidot.com/hardware
+
+//#include <Usb.h>
+//#include <usbhub.h>
+//#include <usbh_midi.h>
+
+#define TOTAL_PEDAIS 3
+
+#define LIGADO 1
+#define DESLIGADO 0
+
+//USB  Usb;
+//MIDI Midi(&Usb);
+
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Botao.h
+/////////////////////////////////////////////////////////////////////////////////////
+typedef struct {
+  	int pino;
+  	unsigned char estado;
+} Botao;
+
+void botao_constructor(Botao * const botao, int pino, unsigned char estado);
+void botao_updateEstado(Botao * const botao);
+int botao_hasEstadoAlterado(Botao * const botao);
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Botao.c
+/////////////////////////////////////////////////////////////////////////////////////
+
+void botao_constructor(Botao * const botao, int pino, unsigned char estado) {
+	botao->pino = pino;
+	botao->estado = estado;
+}
+
+void botao_updateEstado(Botao * const botao) {
+  	botao->estado = digitalRead(botao->pino);
+}
+
+int botao_hasEstadoAlterado(Botao * const botao) {
+	return digitalRead(botao->pino) != botao->estado;
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Pedal.h
+/////////////////////////////////////////////////////////////////////////////////////
+#define PRIMEIRA_PORTA_LED 8
+#define PRIMEIRA_PORTA_BOTAO 2
+
+typedef struct {
+  	Botao botao;
+	int pinoLed;
+} Pedal;
+
+
+void pedal_constructor(Pedal * const pedal, int posicaoPedal);
+void pedal_init(Pedal * const pedal);
+int  pedal_getEstado(Pedal * const pedal);
+void pedal_updateEstado(Pedal * const pedal);
+int  pedal_hasEstadoAlterado(Pedal * const pedal);
+void pedal_atualizar(Pedal * const pedal);
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Pedaleira.h
+/////////////////////////////////////////////////////////////////////////////////////
+typedef struct {
+  	int currentPatch;
+
+  	Pedal pedais[TOTAL_PEDAIS];
+  	Botao up;
+  	Botao down;
+
+} Pedaleira;
+
+
+/////////////////////////////////////////////////////////////////////////////////////
+// comunicacao.h
+/////////////////////////////////////////////////////////////////////////////////////
+void comunicacao_setPatch(Pedaleira * const pedaleira);
+void comunicacao_updatePedal(Pedal * const pedal);
+
+
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Pedaleira.c
+/////////////////////////////////////////////////////////////////////////////////////
+static void initPedal(Pedal * const pedal, int posicao);
+static void initBotao(Botao * const botao, int porta);
+static void pedaleira_irParaPatch(Pedaleira * const pedaleira);
+
+void pedaleira_constructor(Pedaleira * const pedaleira) {
+  	// Patch
+  	pedaleira->currentPatch = 0;
+
+  	// Pedais
+  	Pedal * pedal;
+
+	int posicaoPedal;
+	for (posicaoPedal=0; posicaoPedal<TOTAL_PEDAIS; posicaoPedal++) {
+		pedal = &pedaleira->pedais[posicaoPedal];
+
+		initPedal(pedal, posicaoPedal);
+	}
+
+  	// Botões do patch
+  	initBotao(&pedaleira->up, 7);
+  	initBotao(&pedaleira->down, 6);
+}
+
+static void initPedal(Pedal * const pedal, int posicao) {
+  	pedal_constructor(pedal, posicao);
+  	pedal_init(pedal);
+
+  	pedal_updateEstado(pedal);
+}
+
+static void initBotao(Botao * const botao, int porta) {
+  	botao_constructor(botao, porta, DESLIGADO);
+  	botao_updateEstado(botao);
+}
+
+void pedaleira_nextPatch(Pedaleira * const pedaleira) {
+  	if (pedaleira->currentPatch == 99)
+      	pedaleira->currentPatch = 0;
+
+  	pedaleira_irParaPatch(pedaleira);
+}
+
+void pedaleira_beforePatch(Pedaleira * const pedaleira) {
+  	if (pedaleira->currentPatch == 0)
+      	pedaleira->currentPatch = 99;
+
+  	pedaleira_irParaPatch(pedaleira);
+}
+
+// Isso não deveria existir
+static void pedaleira_irParaPatch(Pedaleira * const pedaleira) {
+  	comunicacao_setPatch(pedaleira);
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Main.c
+/////////////////////////////////////////////////////////////////////////////////////
+Pedaleira pedaleira;
+
+void initComponents();
+void notificarPedaleira(Pedal * const pedal);
+
+
+void setup() {
+  	Serial.begin(57600); //http://arduino.cc/en/Serial/begin
+	initComponents();
+}
+
+void initComponents() {
+  	pedaleira_constructor(&pedaleira);
+}
+
+void loop() {
+	Pedal * pedal;
+	int pino;
+
+	for (pino=0; pino<TOTAL_PEDAIS; pino++) {
+		pedal = &pedaleira.pedais[pino];
+
+		if (pedal_hasEstadoAlterado(pedal)) {
+			pedal_atualizar(pedal);
+			comunicacao_updatePedal(pedal);
+		}
+	}
+  
+    if (botao_hasEstadoAlterado(&pedaleira.up)) {
+      	botao_updateEstado(&pedaleira.up);
+      	pedaleira_nextPatch(&pedaleira);
+    }
+	if (botao_hasEstadoAlterado(&pedaleira.down)) {
+      	botao_updateEstado(&pedaleira.down);
+      	pedaleira_beforePatch(&pedaleira);
+    }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Pedal.c:
+/////////////////////////////////////////////////////////////////////////////////////
+
+static int getPinoLedDoPedal(int posicaoPedal);
+static int getPinoBotaoDoPedal(int posicaoPedal);
+
+void pedal_constructor(Pedal * const pedal, int posicaoPedal) {
+  	pedal->pinoLed = getPinoLedDoPedal(posicaoPedal);
+
+	botao_constructor(
+		&pedal->botao,
+		getPinoBotaoDoPedal(posicaoPedal),
+		DESLIGADO
+	);
+}
+
+static int getPinoLedDoPedal(int posicaoPedal) {
+  	return posicaoPedal + PRIMEIRA_PORTA_LED;
+}
+static int getPinoBotaoDoPedal(int posicaoPedal) {
+  	return posicaoPedal + PRIMEIRA_PORTA_BOTAO;
+}
+
+void pedal_init(Pedal * const pedal) {
+  	pinMode(pedal->botao.pino, INPUT);
+  	pinMode(pedal->pinoLed, OUTPUT);
+}
+
+int pedal_getEstado(Pedal * const pedal) {
+	return pedal->botao.estado;
+}
+
+void pedal_updateEstado(Pedal * const pedal) {
+  	botao_updateEstado(&pedal->botao);
+}
+
+int pedal_hasEstadoAlterado(Pedal * const pedal) {
+	return botao_hasEstadoAlterado(&pedal->botao);
+}
+
+void pedal_atualizar(Pedal * const pedal) {
+  	pedal_updateEstado(pedal);
+	digitalWrite(pedal->pinoLed, pedal_getEstado(pedal));
+}
+
+/////////////////////////////////////////////////////////////////////////////////////
+// Comunicacao.c, Pedaleira.c, alguma outra biblioteca com nome indefinido
+/////////////////////////////////////////////////////////////////////////////////////
+#include <SoftwareSerial.h>
+
+#define POSICAO_PEDAL 7
+#define POSICAO_LIGA_DESLIGA 10
+
+#define MIDI_PROGRAM_CHANGE 0xC0
+
+static void sendMensage(byte * const mensagem, unsigned int tamanho);
+
+// FIXME
+//
+// Coisa observa a pedaleira. 
+// Quando a pedaleira muda de estado, coisa é notificada.
+// Coisa pega o kit de mensagens
+
+void comunicacao_setPatch(Pedaleira * const pedaleira) {
+	// 0xC0 patch
+	byte mensagem[2] = {
+		MIDI_PROGRAM_CHANGE, 0x00
+	};
+
+	mensagem[1] = pedaleira->currentPatch;
+
+  	sendMensage(mensagem, 2);
+}
+
+void comunicacao_updatePedal(Pedal * const pedal) {
+	// 04 F0 52 00 | 04 5A 31 numPedal | 04 00 ligarOuDesligar 00 | 05 F7 53 00
+	byte mensagem[16] = {
+		0x04, 0xF0, 0x52, 0x00,
+		0x04, 0x5A, 0x31, 0x00,
+		0x04, 0x00, 0x00, 0x00,
+		0x05, 0xF7, 0x53, 0x00
+	};
+
+  	mensagem[POSICAO_PEDAL] = pedal->botao.pino;
+	mensagem[POSICAO_LIGA_DESLIGA] = pedal_getEstado(pedal);
+
+  	sendMensage(mensagem, 16);
+}
+
+static void sendMensage(byte * const mensagem, unsigned int tamanho) {
+  	Serial.write(mensagem, tamanho);
+}
+
+/*
+void SendMIDI(byte* mensagem, unsigned int tamanho) {
+	Usb.Task();
+	if (Usb.getUsbTaskState() == USB_STATE_RUNNING) {
+		SendSysEx(mensagem, tamanho);
+		//Midi.SendData(byte2] message);
+		delay(10);
+	}
+}
+*/
